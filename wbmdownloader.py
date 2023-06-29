@@ -21,11 +21,12 @@ def download_archive(input_list):
     if file_name == '':
         file_name = 'index.html'
 
-    if os.path.exists(os.path.join(file_path, file_name)):
-        return None
-
     # construct download url
     download_url = f'https://web.archive.org/web/{file_timestamp}/{file_url}'
+
+    if os.path.exists(os.path.join(file_path, file_name)):
+        #print(f"\nexists: {download_url} to  {file_path}/{file_name}")
+        return False
 
     # download file
     r = requests.get(download_url)
@@ -33,13 +34,13 @@ def download_archive(input_list):
     # create directory structure
     os.makedirs(file_path, exist_ok=True)
 
+    print(f"\nloaded: {download_url} to {file_path}/{file_name} ")
     # save file
     with open(os.path.join(file_path, file_name), 'wb') as f:
         f.write(r.content)
     return True
 
 if __name__ == '__main__':
-
     parser = argparse.ArgumentParser(description='Usage: "python wbmdownloader.py http://example.com" ')
 
     parser.add_argument('url', type=str, help='The website or path to download. e.g. "http://example.com."')
@@ -51,6 +52,8 @@ if __name__ == '__main__':
     parser.add_argument('--all-types', dest='alltypes', action='store_true', default=False, help='Download all file types')
     parser.add_argument('--all-codes', dest='allcodes', action='store_true', default=False, help='Download all status codes (3xx, 4xx)')
     parser.add_argument('--filter', dest='customfilt', type=str, help="Custom regex filter in the format 'field:regex'. E.g. only urls that are html files: 'original:.*html'")
+    parser.add_argument('--json', dest='json_path', type=str, help="Custom json file with urls'")
+    parser.add_argument('--mime', dest='mime', type=str, help="Custom mime'")
     args = parser.parse_args()
 
     if args.url is None:
@@ -62,6 +65,7 @@ if __name__ == '__main__':
     else: 
         base_domain = urlparse(base_url).path
 
+    print(base_domain)
     if args.tsfrom is None:
         ts_from = datetime.date.today() - datetime.timedelta(days=365)
         ts_from = int(ts_from.strftime('%Y%m%d'))
@@ -89,10 +93,11 @@ if __name__ == '__main__':
                 }
     
     if args.exact:
-        payload['url'] = base_url
+        payload['url'] = f"https://{base_url}"
     else:
         if not base_url.endswith('/'):
-            base_url += '/'
+            #base_url += '/'
+            pass
         payload['url'] = base_url + '*'
 
     filter_list = []
@@ -101,7 +106,10 @@ if __name__ == '__main__':
         filter_list.append('statuscode:200')
 
     if args.alltypes is not True:
-        filter_list.append('mimetype:text/html')
+        if args.mime:
+            filter_list.append(f'mimetype:{args.mime}')
+        else:
+            filter_list.append('mimetype:text/html')
     
     if args.customfilt is not None:
         filter_list.append(args.customfilt)
@@ -113,38 +121,69 @@ if __name__ == '__main__':
 
     print('Requesting Index...')
 
-    r = requests.get(request_url, params=payload)
+    json_path = os.path.join('output', base_domain + '.json')
 
-    if r.status_code != 200:
-        print('Bad response!')
-        print('Status code:')
+
+    if args.json_path:
+        json_path = args.json_path
+
+
+    if not os.path.exists(json_path):
+        r = requests.get(request_url, params=payload)
+
+        if r.status_code != 200:
+            print('Bad response!')
+            print('Status code:')
+            print(r.status_code)
+            print('Headers')
+            print(r.headers)
+            print('Content')
+            print(r.content)
+            sys.exit(1)
+
+        print('Got response!')
         print(r.status_code)
-        print('Headers')
-        print(r.headers)
-        print('Content')
-        print(r.content)
-        sys.exit(1)
 
-    print('Got response!')
-    print(r.status_code)
+        json_response = r.json()
+        if len(json_response) == 0:
+            print('No results... maybe url wrong? Maybe timestamps too narrow?')
 
-    json_response = r.json()
-    if len(json_response) == 0:
-        print('No results... maybe url wrong? Maybe timestamps too narrow?')
+        download_list = json_response[1:]
+        print(f'Got {len(download_list)} to download...')
+        if args.onlyjson is True or True:
+            os.makedirs(os.path.join('output'), exist_ok=True)
+            with open(json_path, 'w') as f:
+                f.write(json.dumps(json_response, indent=4, sort_keys=True))
+            print(f'List output stored to: {os.path.join("output", base_domain + ".json")}')
+            #sys.exit(0)
 
-    download_list = json_response[1:]
-    print(f'Got {len(download_list)} to download...')
+    else:
 
-    if args.onlyjson is True:
-        os.makedirs(os.path.join('output'), exist_ok=True)
-        with open(os.path.join('output', base_domain + '.json'), 'w') as f:
-            f.write(json.dumps(json_response, indent=4, sort_keys=True))
-        print(f'List output stored to: {os.path.join("output", base_domain + ".json")}')
-        sys.exit(0)
+        with open(json_path, 'rb') as f:
+            download_list = json.load(f)[1:]
+    urls = dict()
+    for x in download_list:
+        #print(x)
+        key  = x[0]
+        date = x[1]
+        if key not in urls:
+            urls[key] = x
+        if key in urls and urls[key][1] < x[1]:
+            dates = (x[1], urls[key][1])
+            urls[key] = x
 
-    with tqdm(total=len(download_list), unit='urls') as pbar:
+    download_list2 = list()
+    for x in urls:
+        download_list2.append(urls[x])
+
+    import random
+
+
+    #random.shuffle(download_list2)
+
+    with tqdm(total=len(download_list2), unit='urls') as pbar:
         with concurrent.futures.ThreadPoolExecutor(max_workers=n_threads) as executor:
-            futures = {executor.submit(download_archive, url): url for url in download_list}
+            futures = {executor.submit(download_archive, url): url for url in download_list2}
             for future in concurrent.futures.as_completed(futures):
                 future.result()
                 pbar.update(1)
